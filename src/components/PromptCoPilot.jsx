@@ -194,6 +194,7 @@ export default function PromptCoPilot() {
             setV2Draft: setV2DraftEditable,
             onBegin: beginAnalysis,
             onRetry: retryOptimization,
+            onNewSession: startNewSession,
             onViewFinal: () => setScreen('final'),
           }}
         />
@@ -203,7 +204,7 @@ export default function PromptCoPilot() {
           rawPrompt={rawPrompt}
           v2Draft={v2Draft}
           setV2Draft={setV2DraftEditable}
-          onNewSession={beginAnalysis}
+          onNewSession={startNewSession}
         />
       )}
     </div>

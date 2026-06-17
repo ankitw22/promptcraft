@@ -136,7 +136,18 @@ function ReviewScreen({ state, handlers }) {
           flexShrink: 0,
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, flexShrink: 0 }}>
+        <div 
+          onClick={onNewSession}
+          style={{ 
+            display: 'flex', 
+            alignItems: 'center', 
+            gap: 8, 
+            flex: 1, 
+            flexShrink: 0,
+            cursor: 'pointer',
+            userSelect: 'none',
+          }}
+        >
           <LogoIcon size={26} radius={6} />
           <span style={{ fontSize: 13, fontWeight: 600 }}>PromptCraft</span>
         </div>
@@ -511,9 +522,6 @@ function ReviewScreen({ state, handlers }) {
           )}
           {isDone && (
             <>
-              <Btn onClick={onNewSession} variant="outline">
-                New Session
-              </Btn>
               <Btn onClick={onViewFinal} variant="primary">
                 View Final v2 →
               </Btn>

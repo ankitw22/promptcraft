@@ -8,13 +8,13 @@ function FinalScreen({ rawPrompt, v2Draft, setV2Draft, onNewSession }) {
   const lineCount = rawPrompt.split('\n').length;
   const v2LineCount = v2Draft.split('\n').length;
 
-  const copyV2 = () => {
+  const copyV2 = () => { 
     try {
       navigator.clipboard.writeText(v2Draft).catch(() => {});
     } catch (_) {}
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
-  };
+  }; 
 
   return (
     <>
@@ -32,12 +32,15 @@ function FinalScreen({ rawPrompt, v2Draft, setV2Draft, onNewSession }) {
         }}
       >
         <div
+          onClick={onNewSession}
           style={{
             display: 'flex',
             alignItems: 'center',
             gap: 8,
             flex: 1,
             minWidth: 0,
+            cursor: 'pointer',
+            userSelect: 'none',
           }}
         >
           <LogoIcon size={26} radius={6} />
