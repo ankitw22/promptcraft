@@ -1,0 +1,16 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background with rounded corners -->
+  <rect width="128" height="128" rx="32" fill="#E5A555"/>
+  
+  <!-- P Letter - Top horizontal bar -->
+  <rect x="32" y="32" width="50" height="15" rx="7.5" fill="white"/>
+  
+  <!-- P Letter - Right curve of top part -->
+  <rect x="70" y="32" width="26" height="15" rx="7.5" fill="white"/>
+  
+  <!-- P Letter - Bottom horizontal bar -->
+  <rect x="32" y="64" width="38" height="15" rx="7.5" fill="white"/>
+  
+  <!-- Sparkle star -->
+  <path d="M 88 88 L 91 94 L 97 97 L 91 100 L 88 106 L 85 100 L 79 97 L 85 94 Z" fill="white"/>
+</svg>
