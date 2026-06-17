@@ -78,7 +78,6 @@ function SetupScreen({
                 fontSize: 11,
               }}
             >
-              Paste your prompt to optimize
             </span>
           </div>
           <textarea
