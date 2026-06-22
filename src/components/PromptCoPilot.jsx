@@ -1,15 +1,17 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { C } from '../constants/colors';
 import { MODE_DETAILS } from '../constants/content';
-import { optimizePrompt } from '../services/api';
+import { optimizePrompt, generateThreadId } from '../services/api';
 import SetupScreen from './screens/SetupScreen';
 import ReviewScreen from './screens/ReviewScreen';
 import FinalScreen from './screens/FinalScreen';
 
 export default function PromptCoPilot() {
-  // Setup state
+  // ── Setup state ──
   const [rawPrompt, setRawPrompt] = useState('');
-  const [intentLock, setIntentLock] = useState('Use clear language.\nMaintain original intent.\nImprove structure and clarity.');
+  const [intentLock, setIntentLock] = useState(
+    'Use clear language.\nMaintain original intent.\nImprove structure and clarity.'
+  );
   const [modes, setModes] = useState([
     'context',
     'redundancy',
@@ -19,22 +21,25 @@ export default function PromptCoPilot() {
   ]);
   const [chipDescs, setChipDescs] = useState({});
   const [chipEditing, setChipEditing] = useState({});
-  
-  // Get API key from environment variable
+
   const apiKey = import.meta.env.VITE_API_KEY;
 
-  // Review state
+  // ── Review state ──
   const [screen, setScreen] = useState('setup'); // setup | review | final
-  const [phase, setPhase] = useState('idle'); // idle|loading|typing|done|error
+  const [phase, setPhase] = useState('idle');     // idle|loading|typing|done|error|awaiting
   const [v2Draft, setV2DraftRaw] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+
+  // ── Chunk / approval state ──
+  const [pendingChunk, setPendingChunk] = useState(null); // full parsed API response
+  const threadIdRef = useRef(generateThreadId());         // stable thread ID for the session
 
   const v2DraftRef = useRef('');
   const phaseRef = useRef('idle');
   const abortControllerRef = useRef(null);
 
-  // Keep refs in sync
+  // ── Ref-synced setters ──
   const setV2Draft = useCallback((val) => {
     v2DraftRef.current = typeof val === 'function' ? val(v2DraftRef.current) : val;
     setV2DraftRaw(v2DraftRef.current);
@@ -45,69 +50,110 @@ export default function PromptCoPilot() {
     setPhase(p);
   }, []);
 
-  // Call the API with streaming
-  const callOptimizeAPI = useCallback(async () => {
-    try {
-      setIsLoading(true);
-      setErrorMessage('');
-      setPhaseSync('loading');
-      setV2Draft(''); // Clear previous content
+  // ── Build variables for every API call ──
+  const buildVariables = useCallback(() => {
+    const variables = {
+      OLD_PROMPT: rawPrompt,
+      NEW_PROMPT: v2DraftRef.current || '',
+    };
+    if (intentLock?.trim()) variables.intent_lock = intentLock.trim();
+    modes.forEach((mode) => {
+      const desc = chipDescs[mode] || MODE_DETAILS[mode] || mode;
+      if (desc?.trim()) variables[mode] = desc.trim();
+    });
+    return variables;
+  }, [rawPrompt, intentLock, modes, chipDescs]);
 
-      // Create variables object with separate fields
-      const variables = {};
-      
-      // Only add intent_lock if user has entered something
-      if (intentLock && intentLock.trim()) {
-        variables.intent_lock = intentLock.trim();
+  // ── Core API caller ──
+  // isAppend: true when approving a chunk (accumulate), false on first call (replace)
+  const callAPI = useCallback(
+    async (userMessage, isAppend = false) => {
+      try {
+        setIsLoading(true);
+        setErrorMessage('');
+        setPhaseSync('loading');
+
+        // For append calls (approve/reject), don't stream into v2Draft —
+        // the chunks are raw API JSON, not displayable content.
+        // Only the final extracted text gets appended at the end.
+        let isFirstChunk = true;
+
+        const { text, parsed } = await optimizePrompt({
+          userPrompt: userMessage,
+          variables: buildVariables(),
+          pauthkey: apiKey,
+          threadId: threadIdRef.current,
+          onChunk: isAppend ? null : (chunk) => {
+            if (isFirstChunk) {
+              setPhaseSync('typing');
+              setIsLoading(false);
+              isFirstChunk = false;
+            }
+            setV2Draft((prev) => prev + chunk);
+          },
+        });
+
+        console.log('API complete. continue:', parsed?.continue, 'isAppend:', isAppend);
+
+        if (isAppend) {
+          // Append new chunk content to existing approved content
+          setV2Draft((prev) => {
+            const separator = prev && !prev.endsWith('\n') ? '\n' : '';
+            return prev + separator + text;
+          });
+        } else {
+          // First call — set directly
+          setV2Draft(text);
+        }
+
+        if (parsed?.continue === true) {
+          setPendingChunk(parsed);
+          setPhaseSync('awaiting');
+        } else {
+          setPendingChunk(null);
+          setPhaseSync('done');
+        }
+        setIsLoading(false);
+      } catch (error) {
+        console.error('API Error:', error);
+        setErrorMessage(error.message || 'Failed to optimize prompt. Please try again.');
+        setPhaseSync('error');
+        setIsLoading(false);
       }
+    },
+    [buildVariables, apiKey, setPhaseSync, setV2Draft]
+  );
 
-      // Add each selected mode as a separate variable
-      modes.forEach(mode => {
-        // If user has edited this chip, use their custom description
-        // Otherwise use the default description that's shown in the UI
-        const description = chipDescs[mode] || MODE_DETAILS[mode] || mode;
-        
-        if (description && description.trim()) {
-          variables[mode] = description.trim();
-        }
+  // ── Initial optimise call ──
+  const callOptimizeAPI = useCallback(() => {
+    setV2Draft('');
+    callAPI(rawPrompt);
+  }, [rawPrompt, callAPI, setV2Draft]);
+
+  // ── Approve chunk ──
+  const approveChunk = useCallback(() => {
+    if (!pendingChunk) return;
+    const highlightId = pendingChunk.last_updated?.highlight_id;
+    const action = JSON.stringify({ action: 'approve', highlight_id: highlightId });
+    setPendingChunk(null);
+    callAPI(action, true); // isAppend=true — keep previous approved content
+  }, [pendingChunk, callAPI]);
+
+  // ── Reject chunk ──
+  const rejectChunk = useCallback(
+    (reason) => {
+      if (!pendingChunk) return;
+      const highlightId = pendingChunk.last_updated?.highlight_id;
+      const action = JSON.stringify({
+        action: 'reject',
+        highlight_id: highlightId,
+        reason: reason || '',
       });
-
-      console.log('Calling API with streaming...');
-      console.log('Variables being sent:', variables);
-
-      // Set to typing phase immediately when first chunk arrives
-      let isFirstChunk = true;
-
-      const response = await optimizePrompt({
-        userPrompt: rawPrompt,
-        variables: variables, // Pass variables object directly
-        pauthkey: apiKey,
-        onChunk: (chunk) => {
-          // Real-time streaming - add each chunk as it arrives
-          if (isFirstChunk) {
-            console.log('First chunk received, starting stream display');
-            setPhaseSync('typing');
-            setIsLoading(false);
-            isFirstChunk = false;
-          }
-          // Directly append chunk to display (no typewriter delay)
-          setV2Draft(prev => prev + chunk);
-        }
-      });
-
-      console.log('Stream complete. Total length:', response.length);
-      
-      // Ensure we have the full response displayed
-      setV2Draft(response);
-      setPhaseSync('done');
-      setIsLoading(false);
-    } catch (error) {
-      console.error('API Error:', error);
-      setErrorMessage(error.message || 'Failed to optimize prompt. Please try again.');
-      setPhaseSync('error');
-      setIsLoading(false);
-    }
-  }, [rawPrompt, intentLock, modes, chipDescs, apiKey, setPhaseSync, setV2Draft]);
+      setPendingChunk(null);
+      callAPI(action, true); // isAppend=true — keep previous approved content
+    },
+    [pendingChunk, callAPI]
+  );
 
   // Cleanup on unmount
   useEffect(() => {
@@ -119,33 +165,32 @@ export default function PromptCoPilot() {
   // ── Handlers ──
   const beginAnalysis = useCallback(() => {
     if (!rawPrompt.trim()) return;
-    
-    // Reset state
+    // New session — fresh thread
+    threadIdRef.current = generateThreadId();
     setScreen('review');
     setPhaseSync('idle');
     setV2Draft('');
     setErrorMessage('');
-
-    // Start API call after a short delay for UX
-    setTimeout(() => {
-      callOptimizeAPI();
-    }, 500);
+    setPendingChunk(null);
+    setTimeout(() => callOptimizeAPI(), 500);
   }, [rawPrompt, setPhaseSync, setV2Draft, callOptimizeAPI]);
 
   const retryOptimization = useCallback(() => {
     setV2Draft('');
     setErrorMessage('');
+    setPendingChunk(null);
     callOptimizeAPI();
   }, [setV2Draft, callOptimizeAPI]);
 
   const startNewSession = useCallback(() => {
-    // Reset all state and go back to setup screen
     setScreen('setup');
     setPhaseSync('idle');
     setV2Draft('');
     setErrorMessage('');
     setIsLoading(false);
-  }, [setScreen, setPhaseSync, setV2Draft]);
+    setPendingChunk(null);
+    threadIdRef.current = generateThreadId();
+  }, [setPhaseSync, setV2Draft]);
 
   const setV2DraftEditable = useCallback(
     (val) => {
@@ -189,6 +234,7 @@ export default function PromptCoPilot() {
             phase,
             isLoading,
             errorMessage,
+            pendingChunk,
           }}
           handlers={{
             setV2Draft: setV2DraftEditable,
@@ -196,6 +242,8 @@ export default function PromptCoPilot() {
             onRetry: retryOptimization,
             onNewSession: startNewSession,
             onViewFinal: () => setScreen('final'),
+            onApprove: approveChunk,
+            onReject: rejectChunk,
           }}
         />
       )}

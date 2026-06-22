@@ -1,86 +1,115 @@
-import React, { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState } from 'react';
 import { C } from '../../constants/colors';
 import { LogoIcon, Spinner } from '../ui/Icons';
 import Btn from '../ui/Button';
 import { getRealtimeCoverage } from '../../utils/textMatcher';
-import LoadingAnimation, { ThinkingAnimation } from '../ui/LoadingAnimation';
+
+// Minimal skeleton — 3 lines, shown only before first content
+function SkeletonLines() {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '20px 28px' }}>
+      {[88, 70, 80].map((w, i) => (
+        <div
+          key={i}
+          style={{
+            height: 13,
+            borderRadius: 6,
+            background: 'linear-gradient(90deg, #ebebeb 25%, #e0e0e0 50%, #ebebeb 75%)',
+            backgroundSize: '200% 100%',
+            animation: `shimmer 1.6s infinite ease-in-out ${i * 0.15}s`,
+            width: `${w}%`,
+          }}
+        />
+      ))}
+      <style>{`
+        @keyframes shimmer {
+          0%   { background-position: 200% 0; }
+          100% { background-position: -200% 0; }
+        }
+      `}</style>
+    </div>
+  );
+}
 
 function ReviewScreen({ state, handlers }) {
-  const {
-    rawPrompt,
-    v2Draft,
-    phase,
-    isLoading,
-    errorMessage,
-  } = state;
-
-  const {
-    setV2Draft,
-    onBegin,
-    onRetry,
-    onNewSession,
-    onViewFinal,
-  } = handlers;
+  const { rawPrompt, v2Draft, phase, errorMessage, pendingChunk } = state;
+  const { setV2Draft, onBegin, onRetry, onNewSession, onViewFinal, onApprove, onReject } = handlers;
 
   const v2StreamRef = useRef(null);
   const [lineCoverage, setLineCoverage] = useState([]);
+  const [rejectMode, setRejectMode] = useState(false);
+  const [rejectReason, setRejectReason] = useState('');
 
-  const isTyping = phase === 'typing';
-  const isLoadingPhase = phase === 'loading';
-  const isDone = phase === 'done';
-  const isError = phase === 'error';
-  const showAsDiv = phase === 'typing' || phase === 'loading';
+  const isLoading  = phase === 'loading';
+  const isTyping   = phase === 'typing';
+  const isDone     = phase === 'done';
+  const isError    = phase === 'error';
+  const isAwaiting = phase === 'awaiting';
 
-  const sessionTitle = rawPrompt.split('\n')[0].replace(/^#+\s*/, '') || 'Untitled Prompt';
-  const lineCount = rawPrompt.split('\n').length;
+  const lineCount   = rawPrompt.split('\n').length;
   const v2LineCount = v2Draft.split('\n').length;
 
-  // Auto-scroll v2 stream
-  useEffect(() => {
-    if (v2StreamRef.current) v2StreamRef.current.scrollTop = v2StreamRef.current.scrollHeight;
-  }, [v2Draft]);
+  const addedLines   = pendingChunk?.changes?.added_lines   ?? [];
+  const removedLines = pendingChunk?.changes?.removed_lines ?? [];
+  const sectionName  = pendingChunk?.migration?.section_name ?? '';
+  const progress     = pendingChunk?.remaining_summary?.progress_percentage ?? null;
 
-  // Update coverage in real-time as v2Draft changes
+  // Auto-scroll while streaming
   useEffect(() => {
-    if (v2Draft && v2Draft.length > 0) {
-      const coverage = getRealtimeCoverage(rawPrompt, v2Draft);
-      setLineCoverage(coverage);
+    if (v2StreamRef.current && (isTyping || isLoading)) {
+      v2StreamRef.current.scrollTop = v2StreamRef.current.scrollHeight;
+    }
+  }, [v2Draft, isTyping, isLoading]);
+
+  // Coverage highlighting
+  useEffect(() => {
+    if (v2Draft) {
+      setLineCoverage(getRealtimeCoverage(rawPrompt, v2Draft));
     }
   }, [v2Draft, rawPrompt]);
 
-  // Prompt rows with coverage highlighting
+  // Reset reject UI when chunk changes
+  useEffect(() => {
+    setRejectMode(false);
+    setRejectReason('');
+  }, [pendingChunk]);
+
+  const handleRejectSubmit = () => {
+    onReject(rejectReason);
+    setRejectMode(false);
+    setRejectReason('');
+  };
+
+  // ── Status dot + label in header ──
+  const statusLabel = isLoading  ? { dot: '#bbb',    text: 'Calling AI…'     }
+                    : isTyping   ? { dot: '#bbb',    text: 'Generating…'     }
+                    : isAwaiting ? { dot: '#6b7280', text: 'Review chunk'    }
+                    : isDone     ? { dot: '#22c55e', text: 'Complete'        }
+                    : isError    ? { dot: '#ef4444', text: 'Error'           }
+                    : null;
+
+  // ── Original prompt rows ──
   const promptRows = rawPrompt.split('\n').map((t, i) => {
-    const n = i + 1;
     const coverage = lineCoverage[i];
     const isCovered = coverage?.isCovered || false;
-    const coverageScore = coverage?.coverageScore || 0;
-    
-    // Calculate background color based on coverage
-    let backgroundColor = 'transparent';
-    let textColor = C.text;
-    
-    if (isCovered && isDone) {
-      // Fully covered - red background only (no strikethrough)
-      backgroundColor = C.redBg;
-      textColor = C.redT;
-    } else if (coverageScore > 0.3 && (isTyping || isDone)) {
-      // Partially covered - light red
-      const opacity = Math.min(coverageScore, 0.8);
-      backgroundColor = `rgba(255, 200, 200, ${opacity * 0.5})`;
-      textColor = 'oklch(0.45 0.08 25)';
-    }
-    
+    const score = coverage?.coverageScore || 0;
+    const showHighlight = isCovered && (isDone || isAwaiting || isLoading || isTyping);
+    const showPartial = score > 0.3 && (isTyping || isDone || isAwaiting || isLoading);
+
     return (
       <div
-        key={n}
+        key={i}
         style={{
           display: 'flex',
           alignItems: 'flex-start',
-          padding: '4px 0',
-          marginBottom: 2,
-          backgroundColor,
-          transition: 'all 0.8s ease',
-          borderRadius: 4,
+          padding: '3px 0',
+          borderRadius: 3,
+          backgroundColor: showHighlight
+            ? '#fef2f2'
+            : showPartial
+            ? `rgba(254,226,226,${Math.min(score, 0.8) * 0.6})`
+            : 'transparent',
+          transition: 'background 0.6s ease',
         }}
       >
         <span
@@ -90,19 +119,18 @@ function ReviewScreen({ state, handlers }) {
             textAlign: 'right',
             paddingRight: 12,
             fontSize: 11,
-            color: isCovered ? 'oklch(0.72 0.06 25)' : 'oklch(0.80 0.01 85)',
+            color: showHighlight ? '#fca5a5' : '#d1d5db',
             userSelect: 'none',
             lineHeight: '22px',
-            flexShrink: 0,
             fontFamily: "'IBM Plex Mono', monospace",
-            transition: 'color 0.8s ease',
+            flexShrink: 0,
           }}
         >
-          {n}
+          {i + 1}
         </span>
         <span
           style={{
-            color: textColor,
+            color: showHighlight ? '#b91c1c' : C.text,
             fontWeight: t.startsWith('#') ? 600 : 400,
             whiteSpace: 'pre-wrap',
             wordBreak: 'break-word',
@@ -110,8 +138,9 @@ function ReviewScreen({ state, handlers }) {
             paddingRight: 12,
             paddingLeft: 4,
             flex: 1,
+            fontSize: 13,
             fontFamily: "'IBM Plex Mono', monospace",
-            transition: 'all 0.8s ease',
+            transition: 'color 0.6s ease',
           }}
         >
           {t || '\u00A0'}
@@ -120,413 +149,373 @@ function ReviewScreen({ state, handlers }) {
     );
   });
 
+  // ── Diff view (awaiting) ──
+  const DiffView = () => (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column' }}>
+      {/* Section + progress */}
+      {sectionName && (
+        <div
+          style={{
+            marginBottom: 10,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            fontSize: 11,
+            color: '#6b7280',
+          }}
+        >
+          <span style={{ fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.4px' }}>
+            {sectionName}
+          </span>
+          {progress !== null && <span>{progress}%</span>}
+        </div>
+      )}
+
+      {/* Removed lines */}
+      {removedLines.map((line, i) => (
+        <div
+          key={`rm-${i}`}
+          style={{
+            display: 'flex',
+            gap: 8,
+            padding: '4px 10px',
+            marginBottom: 2,
+            borderRadius: 4,
+            background: '#fef2f2',
+            fontFamily: "'IBM Plex Mono', monospace",
+            fontSize: 12,
+            lineHeight: '20px',
+            color: '#b91c1c',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          <span style={{ flexShrink: 0, opacity: 0.5, userSelect: 'none' }}>−</span>
+          <span>{line}</span>
+        </div>
+      ))}
+
+      {/* Added lines */}
+      {addedLines.map((line, i) => (
+        <div
+          key={`add-${i}`}
+          style={{
+            display: 'flex',
+            gap: 8,
+            padding: '4px 10px',
+            marginBottom: 2,
+            borderRadius: 4,
+            background: '#f0fdf4',
+            fontFamily: "'IBM Plex Mono', monospace",
+            fontSize: 12,
+            lineHeight: '20px',
+            color: '#166534',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          <span style={{ flexShrink: 0, opacity: 0.5, userSelect: 'none' }}>+</span>
+          <span>{line}</span>
+        </div>
+      ))}
+
+      {addedLines.length === 0 && removedLines.length === 0 && (
+        <span style={{ fontSize: 12, color: '#9ca3af' }}>No changes.</span>
+      )}
+
+      {/* Approve / Reject inline below the diff */}
+      {!rejectMode && (
+        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+          <Btn
+            onClick={() => setRejectMode(true)}
+            variant="outline"
+            style={{ fontSize: 12, color: '#ef4444', borderColor: '#fca5a5' }}
+          >
+            Reject
+          </Btn>
+          <Btn onClick={onApprove} variant="dark" style={{ fontSize: 12 }}>
+            Approve →
+          </Btn>
+        </div>
+      )}
+
+      {/* Reject reason input inline */}
+      {rejectMode && (
+        <div style={{ marginTop: 16, display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input
+            autoFocus
+            type="text"
+            value={rejectReason}
+            onChange={(e) => setRejectReason(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleRejectSubmit();
+              if (e.key === 'Escape') setRejectMode(false);
+            }}
+            placeholder="Reason (optional) — Enter to send"
+            style={{
+              flex: 1,
+              fontFamily: "'IBM Plex Sans', sans-serif",
+              fontSize: 12,
+              padding: '6px 10px',
+              borderRadius: 6,
+              border: '1px solid #fca5a5',
+              outline: 'none',
+              color: '#111',
+              background: '#fef2f2',
+            }}
+          />
+          <Btn onClick={handleRejectSubmit} variant="primary" style={{ background: '#ef4444', fontSize: 12 }}>
+            Send
+          </Btn>
+          <Btn onClick={() => setRejectMode(false)} variant="outline" style={{ fontSize: 12 }}>
+            Cancel
+          </Btn>
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <>
-      {/* Header */}
+      {/* ── Header ── */}
       <div
         style={{
-          height: 52,
-          minHeight: 52,
+          height: 48,
+          minHeight: 48,
           borderBottom: `1px solid ${C.border}`,
           display: 'flex',
           alignItems: 'center',
-          padding: '0 18px',
-          gap: 14,
-          background: 'white',
+          padding: '0 16px',
+          gap: 12,
+          background: '#fff',
           flexShrink: 0,
         }}
       >
-        <div 
+        <div
           onClick={onNewSession}
-          style={{ 
-            display: 'flex', 
-            alignItems: 'center', 
-            gap: 8, 
-            flex: 1, 
-            flexShrink: 0,
-            cursor: 'pointer',
-            userSelect: 'none',
-          }}
+          style={{ display: 'flex', alignItems: 'center', gap: 7, flex: 1, cursor: 'pointer', userSelect: 'none' }}
         >
-          <LogoIcon size={26} radius={6} />
-          <span style={{ fontSize: 13, fontWeight: 600 }}>PromptCraft</span>
+          <LogoIcon size={24} radius={6} />
+          <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>PromptCraft</span>
         </div>
 
-        {/* Generating pill */}
-        {(isLoadingPhase || isTyping) && (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              background: C.amberBg,
-              padding: '4px 11px',
-              borderRadius: 20,
-              flexShrink: 0,
-            }}
-          >
-            <div
-              style={{
-                width: 6,
-                height: 6,
-                background: C.amber,
-                borderRadius: '50%',
-                animation: 'pulse 1s ease infinite',
-              }}
-            />
-            <span
-              style={{
-                fontSize: 11,
-                fontWeight: 500,
-                color: C.amberT,
-                fontFamily: "'IBM Plex Mono', monospace",
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {isLoadingPhase ? 'Calling AI...' : 'Generating…'}
-            </span>
-          </div>
-        )}
-
-        {/* Success pill */}
-        {isDone && (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              background: C.greenBg,
-              padding: '4px 11px',
-              borderRadius: 20,
-              flexShrink: 0,
-            }}
-          >
-            <div
-              style={{
-                width: 6,
-                height: 6,
-                background: C.green,
-                borderRadius: '50%',
-              }}
-            />
-            <span
-              style={{
-                fontSize: 11,
-                fontWeight: 500,
-                color: C.greenT,
-                fontFamily: "'IBM Plex Mono', monospace",
-                whiteSpace: 'nowrap',
-              }}
-            >
-              Complete
-            </span>
-          </div>
-        )}
-
-        {/* Error pill */}
-        {isError && (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              background: C.redBg,
-              padding: '4px 11px',
-              borderRadius: 20,
-              flexShrink: 0,
-            }}
-          >
-            <div
-              style={{
-                width: 6,
-                height: 6,
-                background: C.red,
-                borderRadius: '50%',
-              }}
-            />
-            <span
-              style={{
-                fontSize: 11,
-                fontWeight: 500,
-                color: C.redT,
-                fontFamily: "'IBM Plex Mono', monospace",
-                whiteSpace: 'nowrap',
-              }}
-            >
-              Error
+        {statusLabel && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            {(isLoading || isTyping) ? (
+              <Spinner />
+            ) : (
+              <div style={{ width: 6, height: 6, borderRadius: '50%', background: statusLabel.dot }} />
+            )}
+            <span style={{ fontSize: 12, color: '#6b7280', fontFamily: "'IBM Plex Mono', monospace" }}>
+              {statusLabel.text}
             </span>
           </div>
         )}
       </div>
 
-      {/* Dual panels */}
+      {/* ── Dual panels ── */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
+
         {/* LEFT: Original */}
         <div
           style={{
-            flex: 1,
-            minWidth: 0,
-            display: 'flex',
-            flexDirection: 'column',
+            flex: 1, minWidth: 0,
+            display: 'flex', flexDirection: 'column',
             borderRight: `1px solid ${C.border}`,
             overflow: 'hidden',
           }}
         >
           <div
             style={{
-              padding: '9px 16px',
-              borderBottom: `1px solid oklch(0.94 0.01 85)`,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
+              padding: '7px 16px',
+              borderBottom: `1px solid ${C.border}`,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
               flexShrink: 0,
             }}
           >
-            <span
-              style={{
-                fontSize: 11,
-                fontWeight: 500,
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-                color: 'oklch(0.58 0.02 85)',
-              }}
-            >
+            <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: '#9ca3af' }}>
               Original
             </span>
-            <span
-              style={{
-                fontSize: 11,
-                color: 'oklch(0.72 0.02 85)',
-                fontFamily: "'IBM Plex Mono', monospace",
-              }}
-            >
+            <span style={{ fontSize: 10, color: '#d1d5db', fontFamily: "'IBM Plex Mono', monospace" }}>
               {lineCount} lines
             </span>
           </div>
-          <div id="prompt-scroll" style={{ flex: 1, overflowY: 'auto', padding: '16px 24px' }}>
+          <div style={{ flex: 1, overflowY: 'auto', padding: '12px 20px' }}>
             {promptRows}
           </div>
         </div>
 
-        {/* RIGHT: Optimised v2 */}
+        {/* RIGHT: Optimised / Diff */}
         <div
           style={{
-            flex: 1,
-            minWidth: 0,
-            display: 'flex',
-            flexDirection: 'column',
-            background: 'oklch(0.99 0.010 145)',
+            flex: 1, minWidth: 0,
+            display: 'flex', flexDirection: 'column',
+            background: '#fafafa',
             overflow: 'hidden',
           }}
         >
           <div
             style={{
-              padding: '9px 16px',
-              borderBottom: `1px solid oklch(0.91 0.05 145)`,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
+              padding: '7px 16px',
+              borderBottom: `1px solid ${C.border}`,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
               flexShrink: 0,
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span
-                style={{
-                  fontSize: 11,
-                  fontWeight: 500,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.5px',
-                  color: 'oklch(0.42 0.12 145)',
-                }}
-              >
-                Optimised v2
-              </span>
-              {(isLoadingPhase || isTyping) && (
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    background: C.amberBg,
-                    padding: '3px 9px',
-                    borderRadius: 20,
-                  }}
-                >
-                  <div
-                    style={{
-                      width: 5,
-                      height: 5,
-                      background: C.amber,
-                      borderRadius: '50%',
-                      animation: 'pulse 1s ease infinite',
-                    }}
-                  />
-                  <span style={{ fontSize: 10, fontWeight: 600, color: C.amberT }}>
-                    {isLoadingPhase ? 'Loading' : 'Generating'}
-                  </span>
-                </div>
-              )}
-            </div>
-            <span
-              style={{
-                fontSize: 11,
-                color: 'oklch(0.60 0.05 145)',
-                fontFamily: "'IBM Plex Mono', monospace",
-              }}
-            >
-              {v2LineCount} lines
+            <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: '#9ca3af' }}>
+              Optimised
+            </span>
+            <span style={{ fontSize: 10, color: '#d1d5db', fontFamily: "'IBM Plex Mono', monospace" }}>
+              {isAwaiting
+                ? `+${addedLines.length} −${removedLines.length}`
+                : `${v2LineCount} lines`}
             </span>
           </div>
 
-          {/* During streaming: plain div (no React batching) */}
-          {showAsDiv ? (
-            <div
-              ref={v2StreamRef}
-              style={{
-                flex: 1,
-                overflowY: 'auto',
-                padding: '20px 28px',
-                fontFamily: "'IBM Plex Mono', monospace",
-                fontSize: 13,
-                lineHeight: '24px',
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                color: C.text,
-              }}
-            >
-              {/* Show loading animation when waiting for response */}
-              {isLoadingPhase && <LoadingAnimation />}
-              
-              {/* Show thinking animation briefly before typing starts */}
-              {isTyping && v2Draft.length === 0 && <ThinkingAnimation />}
-              
-              {/* Show actual content */}
-              {v2Draft}
-            </div>
-          ) : (
-            <textarea
-              value={v2Draft}
-              onChange={(e) => setV2Draft(e.target.value)}
-              style={{
-                flex: 1,
-                width: '100%',
-                padding: '20px 28px',
-                fontFamily: "'IBM Plex Mono', monospace",
-                fontSize: 13,
-                lineHeight: '24px',
-                border: 'none',
-                background: 'transparent',
-                color: C.text,
-              }}
-              spellCheck={false}
-            />
-          )}
+          {/* Content area */}
+          <div
+            ref={v2StreamRef}
+            style={{
+              flex: 1,
+              overflowY: 'auto',
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+          >
+            {/* ── AWAITING: approved content on top, diff below ── */}
+            {isAwaiting && (
+              <>
+                {v2Draft.length > 0 && (
+                  <div
+                    style={{
+                      padding: '20px 24px 12px',
+                      fontFamily: "'IBM Plex Mono', monospace",
+                      fontSize: 13,
+                      lineHeight: '24px',
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                      color: '#166534',
+                    }}
+                  >
+                    {v2Draft}
+                  </div>
+                )}
+                <div
+                  style={{
+                    margin: '0 20px 20px',
+                    borderTop: v2Draft.length > 0 ? `1px solid ${C.border}` : 'none',
+                    paddingTop: v2Draft.length > 0 ? 16 : 0,
+                  }}
+                >
+                  <DiffView />
+                </div>
+              </>
+            )}
+
+            {/* ── NOT awaiting: show accumulated approved content ── */}
+            {!isAwaiting && v2Draft.length > 0 && (
+              isDone ? (
+                <textarea
+                  value={v2Draft}
+                  onChange={(e) => setV2Draft(e.target.value)}
+                  style={{
+                    flex: 1,
+                    width: '100%',
+                    padding: '20px 24px',
+                    fontFamily: "'IBM Plex Mono', monospace",
+                    fontSize: 13,
+                    lineHeight: '24px',
+                    border: 'none',
+                    background: 'transparent',
+                    color: '#166534',
+                    resize: 'none',
+                    outline: 'none',
+                    minHeight: 0,
+                  }}
+                  spellCheck={false}
+                />
+              ) : (
+                <div
+                  style={{
+                    padding: '20px 24px',
+                    fontFamily: "'IBM Plex Mono', monospace",
+                    fontSize: 13,
+                    lineHeight: '24px',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    color: '#166534',
+                  }}
+                >
+                  {v2Draft}
+                </div>
+              )
+            )}
+
+            {/* ── Skeleton — loading with no content yet ── */}
+            {(isLoading || isTyping) && v2Draft.length === 0 && <SkeletonLines />}
+
+            {/* ── Skeleton below content — loading after first chunk approved ── */}
+            {(isLoading || isTyping) && v2Draft.length > 0 && (
+              <div style={{ padding: '8px 24px 16px' }}>
+                <SkeletonLines />
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Bottom bar */}
-      <div
-        style={{
-          minHeight: 72,
-          borderTop: `1px solid ${C.border}`,
-          display: 'flex',
-          alignItems: 'center',
-          padding: '0 18px',
-          gap: 16,
-          background: 'white',
-          flexShrink: 0,
-        }}
-      >
-        {/* Left info area */}
-        <div style={{ flex: 1, minWidth: 0 }}>
-          {isLoadingPhase && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <Spinner />
-              <span style={{ fontSize: 13, color: C.muted }}>
-                Calling AI agent to optimize your prompt...
+      {/* ── Bottom bar ── */}
+      <div style={{ borderTop: `1px solid ${C.border}`, background: '#fff', flexShrink: 0 }}>
+        {/* Action row */}
+        <div
+          style={{
+            minHeight: 60,
+            display: 'flex', alignItems: 'center',
+            padding: '0 16px', gap: 12,
+          }}
+        >
+          {/* Left status text */}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {(isLoading || isTyping) && (
+              <span style={{ fontSize: 12, color: '#9ca3af' }}>
+                Optimizing your prompt…
               </span>
-            </div>
-          )}
-          {isTyping && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <Spinner />
-              <span style={{ fontSize: 13, color: C.muted }}>
-                AI is optimizing your prompt...
+            )}
+            {isAwaiting && (
+              <span style={{ fontSize: 12, color: '#6b7280' }}>
+                {sectionName ? `"${sectionName}" — approve or reject to continue` : 'Review this chunk'}
+                {progress !== null && <span style={{ color: '#d1d5db', marginLeft: 8 }}>{progress}%</span>}
               </span>
-            </div>
-          )}
-          {isError && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <div
-                style={{
-                  width: 22,
-                  height: 22,
-                  borderRadius: '50%',
-                  background: C.redBg,
-                  color: C.red,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: 11,
-                  fontWeight: 700,
-                }}
-              >
-                ✕
-              </div>
-              <span style={{ fontSize: 13, color: C.redT }}>
-                {errorMessage || 'An error occurred'}
+            )}
+            {isError && (
+              <span style={{ fontSize: 12, color: '#ef4444' }}>
+                {errorMessage || 'Something went wrong'}
               </span>
-            </div>
-          )}
-          {isDone && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <div
-                style={{
-                  width: 22,
-                  height: 22,
-                  borderRadius: '50%',
-                  background: C.greenBg,
-                  color: C.green,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: 11,
-                  fontWeight: 700,
-                }}
-              >
-                ✓
-              </div>
-              <span style={{ fontSize: 13, color: C.text }}>
-                Optimization complete! Review and copy your optimized prompt.
+            )}
+            {isDone && (
+              <span style={{ fontSize: 12, color: '#6b7280' }}>
+                Done — review or copy your optimized prompt.
               </span>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
 
-        {/* Right action buttons */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-          {(isTyping || isLoadingPhase) && (
-            <Btn onClick={onBegin} variant="outline">
-              Restart
-            </Btn>
-          )}
-          {isError && (
-            <>
-              <Btn onClick={onNewSession} variant="outline">
-                Back to Setup
+          {/* Right buttons */}
+          <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+            {(isTyping || isLoading) && (
+              <Btn onClick={onBegin} variant="outline" style={{ fontSize: 12 }}>Restart</Btn>
+            )}
+            {isError && (
+              <>
+                <Btn onClick={onNewSession} variant="outline" style={{ fontSize: 12 }}>Back</Btn>
+                <Btn onClick={onRetry} variant="primary" style={{ fontSize: 12 }}>Retry</Btn>
+              </>
+            )}
+            {isDone && (
+              <Btn onClick={onViewFinal} variant="dark" style={{ fontSize: 12 }}>
+                View Final →
               </Btn>
-              <Btn onClick={onRetry} variant="primary">
-                Retry
-              </Btn>
-            </>
-          )}
-          {isDone && (
-            <>
-              <Btn onClick={onViewFinal} variant="primary">
-                View Final v2 →
-              </Btn>
-            </>
-          )}
+            )}
+          </div>
         </div>
       </div>
     </>
